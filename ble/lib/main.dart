@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:http/http.dart' as http;
+import 'package:geolocator/geolocator.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -39,6 +40,8 @@ class FitnessData {
   int? batteryLevel;
   String? deviceInfo;
   String? userName;
+  double? latitude; // GPS координат - өргөрөг
+  double? longitude; // GPS координат - уртраг
   DateTime lastUpdated = DateTime.now();
 
   Map<String, dynamic> toJson() {
@@ -48,6 +51,8 @@ class FitnessData {
       'batteryLevel': batteryLevel,
       'deviceInfo': deviceInfo,
       'userName': userName,
+      'latitude': latitude,
+      'longitude': longitude,
       'lastUpdated': lastUpdated.toIso8601String(),
     };
   }
@@ -106,7 +111,54 @@ class _BleHomePageState extends State<BleHomePage> {
         Permission.bluetoothScan,
         Permission.bluetoothConnect,
         Permission.location,
+        Permission.locationWhenInUse,
       ].request();
+    }
+
+    // GPS location service асаалттай эсэхийг шалгах
+    await _checkLocationService();
+  }
+
+  // GPS байршил сервис шалгах
+  Future<void> _checkLocationService() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      _showSnackBar('GPS сервисийг асаана уу');
+      return;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        _showSnackBar('GPS зөвшөөрөл шаардлагатай');
+        return;
+      }
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      _showSnackBar('GPS зөвшөөрөлийг тохиргооноос асаана уу');
+      return;
+    }
+  }
+
+  // Одоогийн GPS байршил авах
+  Future<void> _getCurrentLocation() async {
+    try {
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+
+      setState(() {
+        fitnessData.latitude = position.latitude;
+        fitnessData.longitude = position.longitude;
+      });
+
+      print(
+          '📍 GPS байршил шинэчлэгдлээ: ${position.latitude}, ${position.longitude}');
+    } catch (e) {
+      print('❌ GPS байршил авахад алдаа: $e');
+      _showSnackBar('GPS байршил авахад алдаа гарлаа');
     }
   }
 
@@ -993,6 +1045,26 @@ class _BleHomePageState extends State<BleHomePage> {
                           ],
                         ),
                         const SizedBox(height: 16),
+                        // GPS координат харуулах
+                        if (fitnessData.latitude != null &&
+                            fitnessData.longitude != null)
+                          Row(
+                            children: [
+                              _buildModernDataItem(
+                                  '📍',
+                                  '${fitnessData.latitude!.toStringAsFixed(4)}°',
+                                  'Өргөрөг',
+                                  Colors.orange),
+                              _buildModernDataItem(
+                                  '🌐',
+                                  '${fitnessData.longitude!.toStringAsFixed(4)}°',
+                                  'Уртраг',
+                                  Colors.green),
+                            ],
+                          ),
+                        if (fitnessData.latitude != null &&
+                            fitnessData.longitude != null)
+                          const SizedBox(height: 16),
                         if (fitnessData.deviceInfo != null)
                           Container(
                             padding: const EdgeInsets.all(12),
@@ -1122,9 +1194,18 @@ class _BleHomePageState extends State<BleHomePage> {
                       connectedDevice != null
                           ? _readSamsungSpecificData
                           : null),
+                  _buildActionButton('📍 GPS тест', _testGPSLocation,
+                      color: Colors.orange),
+                ],
+              ),
+              SizedBox(height: 16),
+              Row(
+                children: [
                   _buildActionButton(
                       '❌ Салах', connectedDevice != null ? _disconnect : null,
                       color: Colors.red),
+                  _buildActionButton('📤 Дата илгээх', _sendDataToWebServer,
+                      color: Colors.green),
                 ],
               ),
 
@@ -1549,6 +1630,9 @@ class _BleHomePageState extends State<BleHomePage> {
   // Web серверт дата илгээх функц
   Future<void> _sendDataToWebServer() async {
     try {
+      // GPS байршил авах
+      await _getCurrentLocation();
+
       // Next.js серверийн health API endpoint
       const String webServerUrl =
           'https://health-monitoring-web.vercel.app/api/health';
@@ -1577,13 +1661,17 @@ class _BleHomePageState extends State<BleHomePage> {
           'timeLabel': timeLabel,
           'dateLabel': dateLabel,
           'deviceName': connectedDevice?.name ?? 'Тодорхойгүй төхөөрөмж',
+          'latitude': fitnessData.latitude, // GPS координат нэмэх
+          'longitude': fitnessData.longitude, // GPS координат нэмэх
         }),
       );
 
       if (response.statusCode == 200) {
-        print('✅ Веб серверт дата илгээгдлээ - ${fitnessData.userName}');
+        print(
+            '✅ Веб серверт дата илгээгдлээ - ${fitnessData.userName} [GPS: ${fitnessData.latitude}, ${fitnessData.longitude}]');
         setState(() {
-          statusMessage = '✅ ${fitnessData.userName}-ын дата илгээгдлээ';
+          statusMessage =
+              '✅ ${fitnessData.userName}-ын дата илгээгдлээ (GPS мэдээлэлтэй)';
         });
       } else {
         print('❌ Веб серверт илгээхэд алдаа: ${response.statusCode}');
@@ -1595,6 +1683,28 @@ class _BleHomePageState extends State<BleHomePage> {
       print('❌ Веб серверт холболт алдаа: $e');
       setState(() {
         statusMessage = '❌ Холболт алдаа: $e';
+      });
+    }
+  }
+
+  // GPS тест функц
+  Future<void> _testGPSLocation() async {
+    setState(() {
+      statusMessage = 'GPS байршил шалгаж байна...';
+    });
+
+    await _getCurrentLocation();
+
+    if (fitnessData.latitude != null && fitnessData.longitude != null) {
+      _showSnackBar(
+          '📍 GPS амжилттай: ${fitnessData.latitude!.toStringAsFixed(6)}, ${fitnessData.longitude!.toStringAsFixed(6)}');
+      setState(() {
+        statusMessage = 'GPS байршил олдлоо! Дата илгээх боломжтой.';
+      });
+    } else {
+      _showSnackBar('❌ GPS байршил олдсонгүй');
+      setState(() {
+        statusMessage = 'GPS алдаа: Байршил олдсонгүй';
       });
     }
   }
